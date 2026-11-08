@@ -1,61 +1,60 @@
-name: Publish download page
+name: Build unsigned iOS IPA
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'downloads/**'
-      - 'tools/prepare_downloads.py'
-      - 'tools/prepare_pages.py'
-      - 'tools/test_downloads.py'
-      - 'tools/check_branding.py'
-      - 'tools/test_branding.py'
-      - '.github/workflows/pages.yml'
-  release:
-    types: [published, edited, deleted]
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: github-pages
-  cancel-in-progress: false
 
 jobs:
   build:
-    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: List schemes
+        working-directory: ios
+        run: |
+          ls -la
+          xcodebuild -list -project *.xcodeproj || true
+
+      - name: Build unsigned .app
+        working-directory: ios
+        run: |
+          set -e
+          PROJ=$(ls -d *.xcodeproj | head -n1)
+          echo "Using project: $PROJ"
+          SCHEME=$(xcodebuild -list -project "$PROJ" -json \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['project']['schemes'][0])")
+          echo "Using scheme: $SCHEME"
+
+          xcodebuild \
+            -project "$PROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -e
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" | head -n1)
+          echo "App: $APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "OpenTVRemote-unsigned.ipa" Payload
+          ls -la
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
-          ref: main
-          persist-credentials: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Verify product branding and preserved compatibility names
-        run: python3 tools/check_branding.py
-      - name: Test branding, page generation and fixture contracts
-        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
-      - name: Prepare static page from published release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PAGES_REPOSITORY: ${{ github.repository }}
-        run: python3 tools/prepare_pages.py --repository "$PAGES_REPOSITORY" --output build/pages
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: build/pages
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/configure-pages@v5
-      - uses: actions/deploy-pages@v4
-        id: deployment
+          name: OpenTVRemote-unsigned-ipa
+          path: ${{ runner.temp }}/ipa/OpenTVRemote-unsigned.ipa
+          retention-days: 7
